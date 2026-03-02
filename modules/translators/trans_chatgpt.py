@@ -262,7 +262,7 @@ class GPTTranslator(BaseTranslator):
                         new_translations = [''] * num_src
                         break
                     self.logger.warning(f'Translation failed due to {e}. Attempt: {retry_attempt}, sleep for {self.retry_timeout} secs...')
-                    self.logger.error(f'Request traceback: ', traceback.format_exc())
+                    self.logger.error(f'Request traceback: {traceback.format_exc()}')
                     time.sleep(self.retry_timeout)
                     # time.sleep(self.retry_timeout)
             # if return_prompt:
@@ -320,7 +320,19 @@ class GPTTranslator(BaseTranslator):
             'top_p': self.top_p,
         }
         max_tokens = self.max_tokens // 2 # Assuming that half of the tokens are used for the query
-        func_parameters = inspect.signature(openai.chat.completions.create).parameters
+        
+        if OPENAPI_V1_API:
+            # 使用 client 实例调用
+            if hasattr(self, '_openai_client') and self._openai_client:
+                openai_chatcompletions_create = self._openai_client.chat.completions.create
+                func_parameters = inspect.signature(self._openai_client.chat.completions.create).parameters
+            else:
+                openai_chatcompletions_create = openai.chat.completions.create
+                func_parameters = inspect.signature(openai.chat.completions.create).parameters
+        else:
+            openai_chatcompletions_create = openai.ChatCompletion.create
+            func_parameters = inspect.signature(openai.ChatCompletion.create).parameters
+            
         if 'max_completion_tokens' in func_parameters:
             func_args['max_completion_tokens'] = max_tokens
         else:
@@ -328,11 +340,6 @@ class GPTTranslator(BaseTranslator):
         if 'presence_penalty' in func_parameters:
             func_args['presence_penalty'] = self.params['presence penalty']
             func_args['frequency_penalty'] = self.params['frequency penalty']
-
-        if OPENAPI_V1_API:
-            openai_chatcompletions_create = openai.chat.completions.create
-        else:
-            openai_chatcompletions_create = openai.ChatCompletion.create
 
         response = openai_chatcompletions_create(**func_args)
 
@@ -374,14 +381,21 @@ class GPTTranslator(BaseTranslator):
 
         self.logger.debug(f'chatgpt prompt: \n {prompt}' )
 
-        openai.api_key = self.params['api key'].strip()
+        api_key = self.params['api key'].strip()
         base_url = self.api_url
+        
         if OPENAPI_V1_API:
-            openai.base_url = base_url
+            # 创建 OpenAI client 实例
+            from openai import OpenAI
+            client = OpenAI(api_key=api_key, base_url=base_url)
+            # 将 client 保存到实例变量，供 _request_translation_with_chat_sample 使用
+            self._openai_client = client
         else:
+            openai.api_key = api_key
             if base_url is None:
                 base_url = 'https://api.openai.com/v1'
             openai.api_base = base_url
+            self._openai_client = None
         
         override_model = self.params['override model'].strip()
         if override_model != '':

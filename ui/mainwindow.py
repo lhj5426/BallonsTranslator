@@ -267,7 +267,7 @@ class MainWindow(mainwindow_cls):
             pcfg.module.textdetector = name
             self.configPanel.detect_config_panel.setDetector(name)
             self.bottomBar.textdet_selector.setSelectedValue(name)
-            LOGGER.info('Text detector set to {}'.format(name))
+            LOGGER.info('文本检测器设置为 {}'.format(name))
 
     def on_finish_setocr(self):
         module_manager = self.module_manager
@@ -276,7 +276,7 @@ class MainWindow(mainwindow_cls):
             pcfg.module.ocr = name
             self.configPanel.ocr_config_panel.setOCR(name)
             self.bottomBar.ocr_selector.setSelectedValue(name)
-            LOGGER.info('OCR set to {}'.format(name))
+            LOGGER.info('OCR设置为 {}'.format(name))
 
     def on_finish_setinpainter(self):
         module_manager = self.module_manager
@@ -285,7 +285,7 @@ class MainWindow(mainwindow_cls):
             pcfg.module.inpainter = name
             self.configPanel.inpaint_config_panel.setInpainter(name)
             self.bottomBar.inpaint_selector.setSelectedValue(name)
-            LOGGER.info('Inpainter set to {}'.format(name))
+            LOGGER.info('图像修复器设置为 {}'.format(name))
 
     def on_finish_settranslator(self):
         module_manager = self.module_manager
@@ -295,7 +295,7 @@ class MainWindow(mainwindow_cls):
             pcfg.module.translator = name
             self.bottomBar.trans_selector.finishSetTranslator(translator)
             self.configPanel.trans_config_panel.finishSetTranslator(translator)
-            LOGGER.info('Translator set to {}'.format(name))
+            LOGGER.info('翻译器设置为 {}'.format(name))
         else:
             LOGGER.error('invalid translator')
         
@@ -312,6 +312,7 @@ class MainWindow(mainwindow_cls):
         elif idx == 3:
             pcfg.module.enable_inpaint = checked
             self.bottomBar.inpaint_selector.setVisible(checked)
+        pcfg.module.update_finish_code()
 
     def setupConfig(self):
 
@@ -374,6 +375,8 @@ class MainWindow(mainwindow_cls):
         module_manager.setInpainter()
 
         self.leftBar.run_imgtrans_clicked.connect(self.run_imgtrans)
+        self.leftBar.run_current_page_clicked.connect(self.run_current_page)
+
 
         self.titleBar.darkModeAction.setChecked(pcfg.darkmode)
 
@@ -478,6 +481,9 @@ class MainWindow(mainwindow_cls):
     def openDir(self, directory: str):
         try:
             self.opening_dir = True
+            # 在加载项目前检查并生成TIF文件的预览图
+            self.generate_tif_thumbnails(directory)
+            # 重新加载项目，此时应该只加载预览图
             self.imgtrans_proj.load(directory)
             self.st_manager.clearSceneTextitems()
             self.titleBar.setTitleContent(osp.basename(directory))
@@ -487,6 +493,29 @@ class MainWindow(mainwindow_cls):
             self.opening_dir = False
             create_error_dialog(e, self.tr('Failed to load project ') + directory)
             return
+
+    def generate_tif_thumbnails(self, directory: str):
+        """
+        为目录中的TIF文件生成预览图，并确保只加载预览图
+        """
+        try:
+            from utils.io_utils import create_thumbnail, find_tif_files
+            # 查找目录中的所有TIF文件
+            tif_files = find_tif_files(directory)
+            
+            # 为每个TIF文件生成预览图
+            for tif_file in tif_files:
+                tif_path = osp.join(directory, tif_file)
+                # 检查是否已经存在对应的预览图
+                base_path = Path(tif_path)
+                thumb_path = base_path.parent / f"{base_path.stem}_thumb.jpg"
+                
+                # 如果预览图不存在，则生成预览图
+                if not osp.exists(thumb_path):
+                    create_thumbnail(tif_path, max_width=1000)
+                    
+        except Exception as e:
+            LOGGER.error(f"Failed to generate TIF thumbnails: {e}")
         
     def dropOpenDir(self, directory: str):
         if isinstance(directory, str) and osp.exists(directory):
@@ -594,6 +623,9 @@ class MainWindow(mainwindow_cls):
             self.titleBar.setTitleContent(page_name=self.imgtrans_proj.current_img)
             self.module_manager.handle_page_changed()
             self.drawingPanel.handle_page_changed()
+            # 更新导航器
+            self.update_navigator_image()
+            self.update_navigator_viewport()
             
         self.page_changing = False
 
@@ -617,6 +649,7 @@ class MainWindow(mainwindow_cls):
         self.titleBar.exporttstyle_trigger.connect(self.export_tstyles)
         self.titleBar.darkmode_trigger.connect(self.on_darkmode_triggered)
         self.titleBar.merge_tool_trigger.connect(self.on_open_merge_tool)
+        self.titleBar.navigator_trigger.connect(self.on_open_navigator)
 
         shortcutA = QShortcut(QKeySequence("A"), self)
         shortcutA.activated.connect(self.shortcutBefore)
@@ -965,6 +998,209 @@ class MainWindow(mainwindow_cls):
         total = success_count + fail_count
         QMessageBox.information(self, "完成", f"区域合并完成\n成功: {success_count}/{total}\n失败: {fail_count}/{total}")
 
+    def on_open_navigator(self):
+        """打开/关闭导航器窗口"""
+        if not hasattr(self, 'navigator_dialog') or self.navigator_dialog is None:
+            from .navigator_widget import NavigatorDialog
+            
+            self.navigator_dialog = NavigatorDialog(self)
+            self.navigator_dialog.navigator.navigation_requested.connect(self.on_navigator_navigation)
+            self.navigator_dialog.zoom_changed.connect(self.on_navigator_zoom_changed)
+            self.navigator_dialog.zoom_at_point.connect(self.on_navigator_zoom_at_point)
+            self.navigator_dialog.viewport_update_requested.connect(self.update_navigator_viewport)
+            
+            # 连接画布缩放变化信号
+            self.canvas.scalefactor_changed.connect(self.on_canvas_scale_changed)
+            self.canvas.gv.view_resized.connect(self.update_navigator_viewport)
+            
+            # 连接滚动条变化信号以实时更新视口
+            self.canvas.hscroll_bar.valueChanged.connect(self.update_navigator_viewport)
+            self.canvas.vscroll_bar.valueChanged.connect(self.update_navigator_viewport)
+            
+            # 连接鼠标位置变化信号
+            self.canvas.mouse_pos_changed.connect(self.on_canvas_mouse_pos_changed)
+            
+            # 加载配置
+            self.navigator_dialog.load_config()
+        
+        if self.navigator_dialog.isVisible():
+            # 如果已显示，则关闭（切换功能）
+            self.navigator_dialog.hide()
+        else:
+            # 显示导航器
+            self.navigator_dialog.show()
+            self.update_navigator_image()
+            self.update_navigator_viewport()
+            self.on_canvas_scale_changed()
+    
+    def update_navigator_image(self):
+        """更新导航器中的图像"""
+        if not hasattr(self, 'navigator_dialog') or self.navigator_dialog is None:
+            return
+        if not self.navigator_dialog.isVisible():
+            return
+        
+        if self.imgtrans_proj.img_valid:
+            # 使用当前显示的图像
+            if self.canvas.base_pixmap is not None:
+                self.navigator_dialog.set_image(self.canvas.base_pixmap)
+            elif self.imgtrans_proj.inpainted_valid:
+                from .misc import ndarray2pixmap
+                pixmap = ndarray2pixmap(self.imgtrans_proj.inpainted_array)
+                self.navigator_dialog.set_image(pixmap)
+        else:
+            self.navigator_dialog.set_image(None)
+    
+    def update_navigator_viewport(self):
+        """更新导航器中的视口矩形"""
+        if not hasattr(self, 'navigator_dialog') or self.navigator_dialog is None:
+            return
+        if not self.navigator_dialog.isVisible():
+            return
+        if not self.imgtrans_proj.img_valid:
+            return
+        
+        # 获取画布视口信息
+        gv = self.canvas.gv
+        
+        # 获取原始图像大小（未缩放的 baseLayer.rect）
+        base_rect = self.canvas.baseLayer.rect()
+        if base_rect.width() <= 0 or base_rect.height() <= 0:
+            return
+        
+        img_width = base_rect.width()
+        img_height = base_rect.height()
+        
+        # 获取缩放因子
+        scale = self.canvas.scale_factor
+        if scale <= 0:
+            scale = 1.0
+        
+        # 获取视口在场景中的可见区域
+        viewport_rect = gv.viewport().rect()
+        visible_scene_rect = gv.mapToScene(viewport_rect).boundingRect()
+        
+        # 将场景坐标转换为 baseLayer 的本地坐标（即原始图像坐标）
+        vis_x = visible_scene_rect.x() / scale
+        vis_y = visible_scene_rect.y() / scale
+        vis_w = visible_scene_rect.width() / scale
+        vis_h = visible_scene_rect.height() / scale
+        
+        # 计算可见区域与图像区域的交集
+        # 图像区域是 (0, 0, img_width, img_height)
+        left = max(0.0, vis_x)
+        top = max(0.0, vis_y)
+        right = min(img_width, vis_x + vis_w)
+        bottom = min(img_height, vis_y + vis_h)
+        
+        # 如果视口完全包含图像（图像完全可见），则红框应覆盖整个缩略图
+        # 检查：如果可见宽度 >= 图像宽度 且 可见区域包含整个图像
+        if vis_w >= img_width and vis_x <= 0 and (vis_x + vis_w) >= img_width:
+            left = 0.0
+            right = img_width
+        if vis_h >= img_height and vis_y <= 0 and (vis_y + vis_h) >= img_height:
+            top = 0.0
+            bottom = img_height
+        
+        # 计算视口比例
+        x_ratio = left / img_width
+        y_ratio = top / img_height
+        width_ratio = (right - left) / img_width
+        height_ratio = (bottom - top) / img_height
+        
+        # 确保范围有效
+        x_ratio = max(0.0, min(1.0, x_ratio))
+        y_ratio = max(0.0, min(1.0, y_ratio))
+        width_ratio = max(0.0, min(1.0, width_ratio))
+        height_ratio = max(0.0, min(1.0, height_ratio))
+        
+        self.navigator_dialog.set_viewport(x_ratio, y_ratio, width_ratio, height_ratio)
+    
+    def on_navigator_navigation(self, x_ratio: float, y_ratio: float):
+        """处理导航器中的导航请求"""
+        if not self.imgtrans_proj.img_valid:
+            return
+        
+        scene_rect = self.canvas.sceneRect()
+        gv = self.canvas.gv
+        
+        # 计算目标场景坐标
+        target_x = x_ratio * scene_rect.width()
+        target_y = y_ratio * scene_rect.height()
+        
+        # 将视图中心移动到目标位置
+        gv.centerOn(target_x, target_y)
+        
+        # 更新视口显示
+        self.update_navigator_viewport()
+    
+    def on_navigator_zoom_changed(self, zoom_percentage: int):
+        """处理导航器中的缩放变化"""
+        if not self.imgtrans_proj.img_valid:
+            return
+        
+        # 计算新的缩放因子
+        new_scale = zoom_percentage / 100.0
+        current_scale = self.canvas.scale_factor
+        
+        if abs(new_scale - current_scale) > 0.001:
+            factor = new_scale / current_scale
+            self.canvas.scaleImage(factor)
+
+    def on_navigator_zoom_at_point(self, zoom_percentage: int, x_ratio: float, y_ratio: float):
+        """处理导航器中以指定位置为中心的缩放"""
+        if not self.imgtrans_proj.img_valid:
+            return
+        
+        # 获取原始图像大小
+        base_rect = self.canvas.baseLayer.rect()
+        img_width = base_rect.width()
+        img_height = base_rect.height()
+        
+        # 计算目标点在图像上的坐标
+        target_img_x = x_ratio * img_width
+        target_img_y = y_ratio * img_height
+        
+        # 计算新的缩放因子
+        new_scale = zoom_percentage / 100.0
+        current_scale = self.canvas.scale_factor
+        
+        if abs(new_scale - current_scale) > 0.001:
+            # 计算目标点在场景中的坐标（缩放前）
+            target_scene_x = target_img_x * current_scale
+            target_scene_y = target_img_y * current_scale
+            
+            # 执行缩放
+            factor = new_scale / current_scale
+            self.canvas.scaleImage(factor)
+            
+            # 计算目标点在场景中的新坐标（缩放后）
+            new_target_scene_x = target_img_x * new_scale
+            new_target_scene_y = target_img_y * new_scale
+            
+            # 将视图中心移动到目标点
+            self.canvas.gv.centerOn(new_target_scene_x, new_target_scene_y)
+    
+    def on_canvas_scale_changed(self):
+        """画布缩放变化时更新导航器"""
+        if not hasattr(self, 'navigator_dialog') or self.navigator_dialog is None:
+            return
+        if not self.navigator_dialog.isVisible():
+            return
+        
+        zoom_percentage = int(self.canvas.scale_factor * 100)
+        self.navigator_dialog.set_zoom_value(zoom_percentage)
+        self.update_navigator_viewport()
+
+    def on_canvas_mouse_pos_changed(self, pos):
+        """画布鼠标位置变化时更新导航器"""
+        if not hasattr(self, 'navigator_dialog') or self.navigator_dialog is None:
+            return
+        if not self.navigator_dialog.isVisible():
+            return
+        
+        self.navigator_dialog.set_canvas_mouse_pos(pos)
+
     def on_req_update_pagetext(self):
         if self.canvas.text_change_unsaved():
             self.st_manager.updateTextBlkList()
@@ -1038,7 +1274,7 @@ class MainWindow(mainwindow_cls):
     def manual_save(self):
         if self.leftBar.imgTransChecker.isChecked()\
             and self.imgtrans_proj.directory is not None:
-            LOGGER.debug('Manually saving...')
+            LOGGER.debug('手动保存中...')
             self.saveCurrentPage(update_scene_text=True, save_proj=True, restore_interface=True, save_rst_only=False)
 
     def saveCurrentPage(self, update_scene_text=True, save_proj=True, restore_interface=False, save_rst_only=False, keep_exist_as_backup=False):
@@ -1242,8 +1478,56 @@ class MainWindow(mainwindow_cls):
             self.st_manager.updateTranslation()
 
     def on_imgtrans_pipeline_finished(self):
+        # 批量处理所有页面的字体格式（在翻译过程中被跳过的页面）
+        if pcfg.module.enable_translate:
+            from utils.logger import logger as LOGGER
+            LOGGER.info('正在批量应用字体格式...')
+            
+            # 获取全局字体格式设置
+            override_fnt_size = pcfg.let_fntsize_flag == 1
+            override_fnt_stroke = pcfg.let_fntstroke_flag == 1
+            override_fnt_color = pcfg.let_fntcolor_flag == 1
+            override_fnt_scolor = pcfg.let_fnt_scolor_flag == 1
+            override_alignment = pcfg.let_alignment_flag == 1
+            override_effect = pcfg.let_fnteffect_flag == 1
+            override_writing_mode = pcfg.let_writing_mode_flag == 1
+            override_font_family = pcfg.let_family_flag == 1
+            gf = self.textPanel.formatpanel.global_format
+            
+            # 批量应用到所有页面
+            for page_index in range(self.imgtrans_proj.num_pages):
+                blk_list = self.imgtrans_proj.get_blklist_byidx(page_index)
+                for blk in blk_list:
+                    if override_fnt_size or blk.font_size < 0:
+                        blk.font_size = gf.font_size
+                    if override_fnt_stroke:
+                        blk.stroke_width = gf.stroke_width
+                    if override_fnt_color:
+                        blk.set_font_colors(fg_colors=gf.frgb)
+                    if override_fnt_scolor:
+                        blk.set_font_colors(bg_colors=gf.srgb)
+                    if override_alignment:
+                        blk.alignment = gf.alignment
+                    if override_effect:
+                        blk.opacity = gf.opacity
+                        blk.shadow_color = gf.shadow_color
+                        blk.shadow_radius = gf.shadow_radius
+                        blk.shadow_strength = gf.shadow_strength
+                        blk.shadow_offset = gf.shadow_offset
+                    if override_writing_mode:
+                        blk.vertical = gf.vertical
+                    if override_font_family or blk.font_family is None:
+                        blk.font_family = gf.font_family
+            
+            LOGGER.info('字体格式应用完成')
+            # 保存项目
+            self.imgtrans_proj.save()
+        
         self.backup_blkstyles.clear()
         self._run_imgtrans_wo_textstyle_update = False
+        # 重置单页模式标志
+        if hasattr(self, 'run_single_page_mode'):
+            self.run_single_page_mode = False
         self.postprocess_mt_toggle = True
         if pcfg.module.empty_runcache and not shared.HEADLESS:
             self.module_manager.unload_all_models()
@@ -1275,8 +1559,57 @@ class MainWindow(mainwindow_cls):
             blk.translation = self.mtSubWidget.sub_text(blk.translation)
             if pcfg.let_uppercase_flag:
                 blk.translation = blk.translation.upper()
+    
+    def apply_global_font_format_to_textblk(self, blk: TextBlock):
+        """应用全局字体格式到单个文本块"""
+        override_fnt_size = pcfg.let_fntsize_flag == 1
+        override_fnt_stroke = pcfg.let_fntstroke_flag == 1
+        override_fnt_color = pcfg.let_fntcolor_flag == 1
+        override_fnt_scolor = pcfg.let_fnt_scolor_flag == 1
+        override_alignment = pcfg.let_alignment_flag == 1
+        override_effect = pcfg.let_fnteffect_flag == 1
+        override_writing_mode = pcfg.let_writing_mode_flag == 1
+        override_font_family = pcfg.let_family_flag == 1
+        gf = self.textPanel.formatpanel.global_format
+        
+        if override_fnt_size or blk.font_size < 0:
+            blk.font_size = gf.font_size
+        if override_fnt_stroke:
+            blk.stroke_width = gf.stroke_width
+        if override_fnt_color:
+            blk.set_font_colors(fg_colors=gf.frgb)
+        if override_fnt_scolor:
+            blk.set_font_colors(bg_colors=gf.srgb)
+        if override_alignment:
+            blk.alignment = gf.alignment
+        if override_effect:
+            blk.opacity = gf.opacity
+            blk.shadow_color = gf.shadow_color
+            blk.shadow_radius = gf.shadow_radius
+            blk.shadow_strength = gf.shadow_strength
+            blk.shadow_offset = gf.shadow_offset
+        if override_writing_mode:
+            blk.vertical = gf.vertical
+        if override_font_family or blk.font_family is None:
+            blk.font_family = gf.font_family
 
     def on_pagtrans_finished(self, page_index: int):
+        # 翻译模式：每完成一页就处理并跳转
+        # 其他模式：只处理当前页和最后一页
+        is_last_page = (page_index + 1 == self.imgtrans_proj.num_pages)
+        is_translate_mode = pcfg.module.enable_translate
+        current_viewing_page = self.pageList.currentIndex().row()
+        
+        # 翻译模式下处理每一页，其他模式只处理当前页和最后一页
+        should_process = is_translate_mode or page_index == current_viewing_page or is_last_page
+        
+        if not should_process:
+            return
+        
+        # 更新前台处理进度，让后台知道可以继续发送信号
+        self.module_manager.last_emitted_page_index = page_index
+        
+        # 以下是原有的处理逻辑
         blk_list = self.imgtrans_proj.get_blklist_byidx(page_index)
         ffmt_list = None
         if len(self.backup_blkstyles) == self.imgtrans_proj.num_pages and len(self.backup_blkstyles[page_index]) == len(blk_list):
@@ -1345,24 +1678,37 @@ class MainWindow(mainwindow_cls):
             self.st_manager.auto_textlayout_flag = pcfg.let_autolayout_flag and \
                 (pcfg.module.enable_detect or pcfg.module.enable_translate)
         
-        if page_index != self.pageList.currentIndex().row():
-            self.pageList.setCurrentRow(page_index)
-        else:
+        # 只在当前查看的页面或最后一个页面时才更新UI
+        current_viewing_page = self.pageList.currentIndex().row()
+        is_last_page = (page_index + 1 == self.imgtrans_proj.num_pages)
+        should_update_ui = (page_index == current_viewing_page) or is_last_page
+        
+        # 如果是单页模式，保持在当前页面不跳转
+        if hasattr(self, 'run_single_page_mode') and self.run_single_page_mode:
+            # 更新当前页面的显示
             self.imgtrans_proj.set_current_img_byidx(page_index)
             self.canvas.updateCanvas()
             self.st_manager.updateSceneTextitems()
+        elif should_update_ui:
+            # 正常模式：只在当前页面或最后一页时更新UI
+            if page_index != current_viewing_page:
+                self.pageList.setCurrentRow(page_index)
+            else:
+                self.imgtrans_proj.set_current_img_byidx(page_index)
+                self.canvas.updateCanvas()
+                self.st_manager.updateSceneTextitems()
 
-        if not pcfg.module.enable_detect and pcfg.module.enable_translate:
+        if not pcfg.module.enable_detect and pcfg.module.enable_translate and should_update_ui:
             for blkitem in self.st_manager.textblk_item_list:
                 blkitem.squeezeBoundingRect()
 
-        if page_index + 1 == self.imgtrans_proj.num_pages:
+        if is_last_page:
             self.st_manager.auto_textlayout_flag = False
-
-        # save proj file on page trans finished
-        self.imgtrans_proj.save()
-
-        self.saveCurrentPage(False, False)
+            # 最后一页时保存
+            self.imgtrans_proj.save()
+            self.saveCurrentPage(False, False)
+        # 不在这里保存，避免阻塞主线程
+        # 保存操作会在pipeline结束后统一进行
 
     def on_savestate_changed(self, unsaved: bool):
         save_state = self.tr('unsaved') if unsaved else self.tr('saved')
@@ -1415,13 +1761,13 @@ class MainWindow(mainwindow_cls):
             # 创建自定义消息框，添加"继续运行"选项
             msgBox = QMessageBox(self)
             msgBox.setIcon(QMessageBox.Question)
-            msgBox.setWindowTitle(self.tr('Confirmation'))
-            msgBox.setText(self.tr('\"Run\" will clear previous results, \"Continue\" will try to run from previous progress'))
+            msgBox.setWindowTitle('确认')
+            msgBox.setText('"运行" 将清除之前的结果，"继续" 将尝试从之前的进度继续运行')
             
-            # 添加三个按钮（直接使用中文）
-            restart_btn = msgBox.addButton(self.tr('Run'), QMessageBox.YesRole)
-            continue_btn = msgBox.addButton(self.tr('Continue'), QMessageBox.AcceptRole)
-            cancel_btn = msgBox.addButton(self.tr('Cancel'), QMessageBox.RejectRole)
+            # 添加三个按钮
+            restart_btn = msgBox.addButton('运行', QMessageBox.YesRole)
+            continue_btn = msgBox.addButton('继续', QMessageBox.AcceptRole)
+            cancel_btn = msgBox.addButton('取消', QMessageBox.RejectRole)
             
             msgBox.setDefaultButton(continue_btn)
             msgBox.exec_()
@@ -1435,6 +1781,27 @@ class MainWindow(mainwindow_cls):
                 return
             # 如果是 restart_btn，继续执行下面的代码（重新运行）
         self.on_run_imgtrans()
+
+    def run_current_page(self):
+        """仅对当前页面执行OCR/翻译"""
+        if self.imgtrans_proj.is_empty:
+            return
+        
+        current_page = self.imgtrans_proj.current_img
+        if not current_page:
+            QMessageBox.warning(self, '警告', '没有选中的页面')
+            return
+        
+        # 保存当前页面索引，执行完成后不要跳转
+        self.run_single_page_mode = True
+        self.single_page_index = self.pageList.currentIndex().row()
+        
+        # 设置当前页面模式标志，用于日志显示（设置在ImgtransThread上）
+        self.module_manager.imgtrans_thread.current_page_mode = True
+        
+        # 只处理当前页面
+        pages_to_process = [current_page]
+        self.on_run_imgtrans(continue_mode=False, pages_to_process=pages_to_process)
 
     def run_imgtrans_wo_textstyle_update(self):
         self._run_imgtrans_wo_textstyle_update = True
@@ -1455,27 +1822,100 @@ class MainWindow(mainwindow_cls):
         
         # 继续模式：先检查哪些页面需要处理
         if continue_mode and not pages_to_process:
+            from utils.logger import logger as LOGGER
+            LOGGER.info(f'继续模式: 正在检查 {len(self.imgtrans_proj.pages)} 个页面')
+            
+            # 收集所有问题页面的详细信息
+            problem_pages_info = []
+            
             for page_name in self.imgtrans_proj.pages:
+                page_completed = self.imgtrans_proj.get_page_progress(page_name)
+                
+                # 检查页面的实际状态
                 page_blklist = self.imgtrans_proj.pages[page_name]
-                # 如果页面没有文本块，或者所有文本块都没有文本，则需要处理
-                if len(page_blklist) == 0:
-                    pages_to_process.append(page_name)
+                page_has_blocks = len(page_blklist) > 0
+                
+                # 检查是否所有文本块都有文本内容（非空且非纯空白）
+                all_blocks_have_text = page_has_blocks and all(
+                    blk.text and len(blk.text) > 0 and any(t.strip() for t in blk.text) 
+                    for blk in page_blklist
+                )
+                
+                # 获取finish_code用于调试
+                finish_code = self.imgtrans_proj._image_info[page_name]['finish_code']
+                
+                # 判断是否需要处理该页面
+                needs_processing = not page_completed
+                problem_reason = ""
+                
+                if not needs_processing and page_completed:
+                    # 页面显示已完成，但检查实际状态是否一致
+                    if pcfg.module.enable_detect and not page_has_blocks:
+                        needs_processing = True
+                        problem_reason = "启用了检测但没有文本块"
+                    elif pcfg.module.enable_ocr and page_has_blocks and not all_blocks_have_text:
+                        needs_processing = True
+                        # 统计空文本块数量并记录详细信息
+                        empty_blocks_count = 0
+                        for idx, blk in enumerate(page_blklist):
+                            has_text = blk.text and len(blk.text) > 0 and any(t.strip() for t in blk.text)
+                            if not has_text:
+                                empty_blocks_count += 1
+                                # 调试：记录空文本块的详细信息
+                                LOGGER.debug(f'  空文本块 #{idx}: text={blk.text}, len={len(blk.text) if blk.text else 0}')
+                        problem_reason = f"共 {len(page_blklist)} 个检测框，其中 {empty_blocks_count} 个检测框为空"
                 else:
-                    # 检查是否有文本块没有文本
-                    has_empty_blk = any(not blk.text or len(blk.text) == 0 for blk in page_blklist)
-                    if has_empty_blk:
-                        pages_to_process.append(page_name)
+                    # 页面未完成
+                    if not page_completed:
+                        problem_reason = f"页面未完成 (完成代码={finish_code}, 需要={pcfg.module.finish_code})"
+                
+                if needs_processing:
+                    pages_to_process.append(page_name)
+                    problem_pages_info.append((page_name, problem_reason))
+            
+            if len(pages_to_process) == 0:
+                return
+            else:
+                # 统一显示所有问题页面（只显示有检测框问题的，不显示"页面未完成"）
+                LOGGER.info(f'检测到有问题的页面 {len(pages_to_process)} 个:')
+                for page_name, reason in problem_pages_info:
+                    # 只显示有具体问题描述的页面，不显示"页面未完成"
+                    if not reason.startswith("页面未完成"):
+                        LOGGER.info(f'  问题页面 {page_name}: {reason}')
+                LOGGER.info(f'开始处理这 {len(pages_to_process)} 个页面...')
+        else:
+            # 非continue模式：只重置需要处理的页面
+            if pages_to_process:
+                for page_name in pages_to_process:
+                    self.imgtrans_proj.set_page_progress(page_name, 0)
+            else:
+                # 如果没有指定pages_to_process，则重置所有页面
+                for page_name in self.imgtrans_proj.pages:
+                    self.imgtrans_proj.set_page_progress(page_name, 0)
         
         if pcfg.module.enable_detect:
             for page in self.imgtrans_proj.pages:
                 if not pcfg.module.keep_exist_textlines:
-                    # 如果指定了pages_to_process（仅本页或继续模式），只清空指定的页面
-                    if pages_to_process:
-                        if page in pages_to_process:
+                    # 在continue模式下，只清空需要处理的页面
+                    # 在非continue模式下，清空所有页面
+                    if not pages_to_process or page in pages_to_process:
+                        page_blklist = self.imgtrans_proj.pages[page]
+                        page_has_blocks = len(page_blklist) > 0
+                        
+                        # 如果是continue模式且页面有检测框，不清空检测框，只重置进度
+                        # 这样可以保留检测框用于OCR
+                        if continue_mode and page_has_blocks and page in pages_to_process:
+                            # 保留检测框，只重置该页面的finish_code
+                            # 清空OCR相关的标志位，保留检测标志位
+                            current_code = self.imgtrans_proj._image_info[page]['finish_code']
+                            # 保留FIN_DET标志，清除其他标志
+                            from utils.config import RunStatus
+                            self.imgtrans_proj.set_page_progress(page, current_code & RunStatus.FIN_DET)
+                        else:
+                            # 非continue模式或页面没有检测框，清空页面并重置进度
                             self.imgtrans_proj.pages[page].clear()
-                    else:
-                        # 没有指定pages_to_process，清空所有页面
-                        self.imgtrans_proj.pages[page].clear()
+                            if page in pages_to_process:
+                                self.imgtrans_proj.set_page_progress(page, 0)
         else:
             self.st_manager.updateTextBlkList()
             textblk: TextBlock = None
@@ -1497,13 +1937,15 @@ class MainWindow(mainwindow_cls):
                         textblk.set_font_colors((0, 0, 0), (0, 0, 0))
                     if pcfg.module.enable_translate or (all_disabled and not self._run_imgtrans_wo_textstyle_update) or pcfg.module.enable_ocr:
                         textblk.rich_text = ''
-                    textblk.vertical = textblk.src_is_vertical
-        
-        # 传递需要处理的页面列表给module_manager
-        # 调试：显示要处理的页面
-        if pages_to_process:
-            LOGGER.debug(f'imgtrans pages_to_process = {pages_to_process}')
-            # QMessageBox.information(self, '调试', f'要处理的页面: {pages_to_process}')
+                    
+                    # 只有在启用了某些模块时才重置vertical
+                    # 如果所有模块都不勾选，保留现有的vertical设置
+                    if not all_disabled:
+                        textblk.vertical = textblk.src_is_vertical
+                    
+                    # 如果所有模块都不勾选，直接应用全局字体格式
+                    if all_disabled and not self._run_imgtrans_wo_textstyle_update:
+                        self.apply_global_font_format_to_textblk(textblk)
         
         # 如果有指定pages_to_process或者是continue_mode，则传递页面列表
         self.module_manager.runImgtransPipeline(pages_to_process if (pages_to_process or continue_mode) else None)
@@ -1661,6 +2103,26 @@ class MainWindow(mainwindow_cls):
         for blk in textblocks:
             text = blk.get_text()
             blk.text = self.ocrSubWidget.sub_text(text)
+
+        # 字体检测：在 OCR 完成后按配置执行（按需导入以减少启动开销）
+        try:
+            if pcfg.module.ocr_font_detect:
+                try:
+                    from utils import font_detect
+                    for blk in textblocks:
+                        try:
+                            name, conf = font_detect.detect_font_from_block(img, blk)
+                            blk._detected_font_name = name
+                            blk._detected_font_confidence = float(conf)
+                        except Exception:
+                            # don't break the pipeline on detector errors
+                            blk._detected_font_name = ''
+                            blk._detected_font_confidence = 0.0
+                except Exception:
+                    # failed to import or run detector
+                    pass
+        except Exception:
+            pass
 
     def translate_preprocess(self, translations: List[str] = None, textblocks: List[TextBlock] = None, translator = None, source_text:list = []):
         for i in range(len(source_text)):

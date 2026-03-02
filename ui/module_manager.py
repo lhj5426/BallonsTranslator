@@ -25,7 +25,7 @@ from utils.message import create_error_dialog, create_info_dialog
 from .custom_widget import ImgtransProgressMessageBox, ParamComboBox
 from .configpanel import ConfigPanel
 from utils.proj_imgtrans import ProjImgTrans
-from utils.config import pcfg
+from utils.config import pcfg, RunStatus
 cfg_module = pcfg.module
 
 
@@ -230,11 +230,14 @@ class TranslateThread(ModuleThread):
 
     def _run_translate_pipeline(self):
         delay = self.translator.delay()
+        from utils.logger import logger as LOGGER
+        LOGGER.info(f'翻译线程启动，队列中有 {len(self.pipeline_pagekey_queue)} 个页面待翻译')
 
         while not self.pipeline_finished():
             if self.stop_requested:
                 self.module_thread_stopped.emit()
                 self.stop_requested = False
+                LOGGER.info('翻译线程被停止')
                 break
 
             if len(self.pipeline_pagekey_queue) == 0:
@@ -243,12 +246,12 @@ class TranslateThread(ModuleThread):
             
             page_key = self.pipeline_pagekey_queue.pop(0)
             self.blockSignals(True)
+            trans_success = True
             try:
                 self._translate_page(self.imgtrans_proj.pages, page_key, emit_finished=False)
             except Exception as e:
-                
                 # TODO: allowing retry/skip/terminate
-
+                trans_success = False
                 msg = self.tr('Translation Failed.')
                 if isinstance(e, MissingTranslatorParams):
                     msg = msg + '\n' + str(e) + self.tr(' is required for ' + self.translator.name)
@@ -261,6 +264,8 @@ class TranslateThread(ModuleThread):
                 # return
             self.blockSignals(False)
             self.finished_counter += 1
+            if trans_success:
+                self.imgtrans_proj.update_page_progress(page_key, RunStatus.FIN_TRANSLATE)
             self.progress_changed.emit(self.finished_counter)
 
             if not self.pipeline_finished() and delay > 0:
@@ -274,6 +279,7 @@ class ImgtransThread(QThread):
     update_ocr_progress = Signal(int)
     update_translate_progress = Signal(int)
     update_inpaint_progress = Signal(int)
+    update_general_progress = Signal(int)  # 通用进度（当所有模块都不勾选时）
 
     finish_blktrans_stage = Signal(str, int)
     finish_blktrans = Signal(int, list)
@@ -305,7 +311,7 @@ class ImgtransThread(QThread):
         while True:
             # might freeze UI
             if self.translate_thread.isRunning() or self.inpaint_thread.isRunning() or self.ocr_thread.isRunning() or self.textdetect_thread.isRunning():
-                time.sleep(0.1)
+                time.sleep(0.05)
                 continue
             break
 
@@ -386,6 +392,7 @@ class ImgtransThread(QThread):
         
         # 如果指定了pages_to_process，只处理这些页面
         all_pages = list(self.imgtrans_proj.pages.keys())
+        is_current_page_mode = False
         if self.pages_to_process is not None and len(self.pages_to_process) > 0:
             pages_to_iterate = self.pages_to_process
             self.num_pages = num_pages = len(self.pages_to_process)
@@ -393,14 +400,21 @@ class ImgtransThread(QThread):
             for process_idx, page_name in enumerate(pages_to_iterate):
                 if page_name in all_pages:
                     self.process_idx_to_page_idx[process_idx] = all_pages.index(page_name)
-            LOGGER.info(f'Processing specific pages: {len(pages_to_iterate)} pages')
+            
+            # 根据模式显示不同的日志
+            if hasattr(self, 'current_page_mode') and self.current_page_mode and len(pages_to_iterate) == 1:
+                LOGGER.info(f'当前页面模式: 正在处理当前页面 {pages_to_iterate[0]}')
+                is_current_page_mode = True
+                self.current_page_mode = False  # 重置标志
+            else:
+                LOGGER.info(f'继续模式: 处理 {len(pages_to_iterate)} 个页面')
         else:
             pages_to_iterate = all_pages
             self.num_pages = num_pages = len(self.imgtrans_proj.pages)
             # 处理索引等于实际页面索引
             for i in range(num_pages):
                 self.process_idx_to_page_idx[i] = i
-            LOGGER.info(f'Processing all {num_pages} pages')
+            LOGGER.info(f'处理全部 {num_pages} 个页面')
         self.textdetect_thread.num_process_pages = self.num_pages
         self.ocr_thread.num_process_pages = self.num_pages
         self.inpaint_thread.num_process_pages = self.num_pages
@@ -415,12 +429,28 @@ class ImgtransThread(QThread):
         if self.parallel_trans and cfg_module.enable_translate:
             self.translate_thread.runTranslatePipeline(self.imgtrans_proj)
 
-        for imgname in pages_to_iterate:
+        # 用于跟踪通用进度（当所有模块都不勾选时）
+        general_progress_counter = 0
+        all_disabled = cfg_module.all_stages_disabled()
+
+        for i, imgname in enumerate(pages_to_iterate, 1):
             
             # 检查是否请求停止
             if self.stop_requested:
-                LOGGER.info('Image translation pipeline stopped by user')
                 break
+            
+            # 显示当前处理的页面（当前页面模式下不显示进度，因为已经在前面显示了）
+            if not is_current_page_mode:
+                LOGGER.info(f'正在处理第 {i}/{len(pages_to_iterate)} 页: {imgname}')
+            
+            # 如果所有模块都不勾选，更新通用进度
+            if all_disabled:
+                general_progress_counter += 1
+                # 发送通用进度更新信号
+                self.update_general_progress.emit(general_progress_counter)
+                # 不在这里触发页面完成信号，避免阻塞
+                # 字体样式将在pipeline结束后统一应用
+                continue  # 跳过后续的模块处理
                 
             img = self.imgtrans_proj.read_img(imgname)
             mask = blk_list = None
@@ -430,6 +460,11 @@ class ImgtransThread(QThread):
                 try:
                     mask, blk_list = self.textdetector.detect(img, self.imgtrans_proj)
                     need_save_mask = True
+                    # 确保新检测的文本块没有旧的OCR文本
+                    for blk in blk_list:
+                        blk.text = []
+                        blk.translation = ""
+                        blk.rich_text = ""
                 except Exception as e:
                     create_error_dialog(e, self.tr('Text Detection Failed.'), 'TextDetectFailed')
                     blk_list = []
@@ -446,6 +481,7 @@ class ImgtransThread(QThread):
                     self.imgtrans_proj.save_mask(imgname, mask)
                     need_save_mask = False
                     
+                self.imgtrans_proj.update_page_progress(imgname, RunStatus.FIN_DET)
                 self.update_detect_progress.emit(self.detect_counter)
 
             if blk_list is None:
@@ -493,6 +529,7 @@ class ImgtransThread(QThread):
                                 self.imgtrans_proj.save_mask(imgname, mask)
                                 need_save_mask = False
 
+                self.imgtrans_proj.update_page_progress(imgname, RunStatus.FIN_OCR)
                 self.update_ocr_progress.emit(self.ocr_counter)
 
             if need_save_mask and mask is not None:
@@ -519,6 +556,7 @@ class ImgtransThread(QThread):
                         create_error_dialog(e, self.tr('Inpainting Failed.'), 'InpaintFailed')
                     
                 self.inpaint_counter += 1
+                self.imgtrans_proj.update_page_progress(imgname, RunStatus.FIN_INPAINT)
                 self.update_inpaint_progress.emit(self.inpaint_counter)
             else:
                 if len(blk_removed) > 0:
@@ -535,9 +573,15 @@ class ImgtransThread(QThread):
                 blk_list = self.imgtrans_proj.pages[imgname]
                 self.translator.translate_textblk_lst(blk_list)
                 self.translate_counter += 1
+                self.imgtrans_proj.update_page_progress(imgname, RunStatus.FIN_TRANSLATE)
                 self.update_translate_progress.emit(self.translate_counter)
 
-        if self.stop_requested and (not cfg_module.enable_translate or not self.parallel_trans):
+        # 如果被停止，发送停止信号
+        if self.stop_requested:
+            if not cfg_module.enable_translate or not self.parallel_trans:
+                self.pipeline_stopped.emit()
+        # 如果所有模块都不勾选，手动发送完成信号
+        elif cfg_module.all_stages_disabled():
             self.pipeline_stopped.emit()
 
     def detect_finished(self) -> bool:
@@ -621,6 +665,7 @@ class ModuleManager(QObject):
         self.imgtrans_proj = imgtrans_proj
         self.check_inpaint_fin_timer = QTimer(self)
         self.check_inpaint_fin_timer.timeout.connect(self.check_inpaint_th_finished)
+        self.last_emitted_page_index = -1  # 记录最后发送信号的页面索引
 
     def setupThread(self, config_panel: ConfigPanel, imgtrans_progress_msgbox: ImgtransProgressMessageBox, ocr_postprocess: Callable = None, translate_preprocess: Callable = None, translate_postprocess: Callable = None):
         self.textdetect_thread = TextDetectThread()
@@ -642,6 +687,7 @@ class ModuleManager(QObject):
         self.imgtrans_thread.update_ocr_progress.connect(self.on_update_ocr_progress)
         self.imgtrans_thread.update_translate_progress.connect(self.on_update_translate_progress)
         self.imgtrans_thread.update_inpaint_progress.connect(self.on_update_inpaint_progress)
+        self.imgtrans_thread.update_general_progress.connect(self.on_update_general_progress)
         self.imgtrans_thread.finish_blktrans_stage.connect(self.on_finish_blktrans_stage)
         self.imgtrans_thread.finish_blktrans.connect(self.on_finish_blktrans)
         self.imgtrans_thread.pipeline_stopped.connect(self.on_imgtrans_thread_stopped)
@@ -740,25 +786,52 @@ class ModuleManager(QObject):
         self.last_finished_index = -1
         self.terminateRunningThread()
         
-        if cfg_module.all_stages_disabled() and self.imgtrans_proj is not None and self.imgtrans_proj.num_pages > 0:
-            for ii in range(self.imgtrans_proj.num_pages):
-                self.page_trans_finished.emit(ii)
-            self.imgtrans_pipeline_finished.emit()
-            return
+        # 检查是否所有模块都不勾选
+        all_disabled = cfg_module.all_stages_disabled()
         
-        self.progress_msgbox.detect_bar.setVisible(cfg_module.enable_detect)
-        self.progress_msgbox.ocr_bar.setVisible(cfg_module.enable_ocr)
-        self.progress_msgbox.translate_bar.setVisible(cfg_module.enable_translate)
-        self.progress_msgbox.inpaint_bar.setVisible(cfg_module.enable_inpaint)
+        # 即使所有模块都不勾选，也要显示进度条并走pipeline流程
+        # 因为可能需要更新文本样式
+        if all_disabled:
+            # 显示通用进度条，隐藏所有模块进度条
+            if self.progress_msgbox.task_progress_bar is not None:
+                self.progress_msgbox.task_progress_bar.setVisible(True)
+            self.progress_msgbox.detect_bar.setVisible(False)
+            self.progress_msgbox.ocr_bar.setVisible(False)
+            self.progress_msgbox.translate_bar.setVisible(False)
+            self.progress_msgbox.inpaint_bar.setVisible(False)
+        else:
+            # 隐藏通用进度条，显示对应的模块进度条
+            if self.progress_msgbox.task_progress_bar is not None:
+                self.progress_msgbox.task_progress_bar.setVisible(False)
+            self.progress_msgbox.detect_bar.setVisible(cfg_module.enable_detect)
+            self.progress_msgbox.ocr_bar.setVisible(cfg_module.enable_ocr)
+            self.progress_msgbox.translate_bar.setVisible(cfg_module.enable_translate)
+            self.progress_msgbox.inpaint_bar.setVisible(cfg_module.enable_inpaint)
+        
         self.progress_msgbox.zero_progress()
         self.progress_msgbox.show()
         self.imgtrans_thread.runImgtransPipeline(self.imgtrans_proj, pages_to_process)
     
     def stopImgtransPipeline(self):
-        """停止图像翻译流程"""
-        LOGGER.info('Stopping image translation pipeline...')
+        """立即停止图像翻译流程"""
+        from utils.logger import logger as LOGGER
+        LOGGER.info('用户停止了软件运行')
+        
+        # 设置停止标志
         if self.imgtrans_thread.isRunning():
             self.imgtrans_thread.requestStop()
+        
+        # 停止翻译线程
+        if self.translate_thread.isRunning():
+            self.translate_thread.requestStop()
+        
+        # 立即隐藏进度条
+        self.progress_msgbox.hide()
+        
+        # 不等待线程结束，直接触发完成信号
+        # 使用QTimer异步触发，避免阻塞
+        from qtpy.QtCore import QTimer
+        QTimer.singleShot(0, self.imgtrans_pipeline_finished.emit)
 
     def runBlktransPipeline(self, blk_list: List[TextBlock], tgt_img: np.ndarray, mode: int, blk_ids: List[int], tgt_mask):
         self.terminateRunningThread()
@@ -815,12 +888,22 @@ class ModuleManager(QObject):
         ri = self.imgtrans_thread.recent_finished_index(progress)
         if 'translate' in shared.pbar:
             shared.pbar['translate'].update(1)
-        progress = int(progress / self.imgtrans_thread.num_pages * 100)
-        self.progress_msgbox.updateTranslateProgress(progress)
+        progress_percent = int(progress / self.imgtrans_thread.num_pages * 100)
+        self.progress_msgbox.updateTranslateProgress(progress_percent)
+        
         if ri != self.last_finished_index:
             self.last_finished_index = ri
-            self.page_trans_finished.emit(ri)
-        if progress == 100:
+            
+            # 缓冲机制：只有当前台处理进度跟上时才发送新信号
+            # 允许后台最多领先前台50个页面
+            buffer_size = 50
+            if ri - self.last_emitted_page_index < buffer_size:
+                self.page_trans_finished.emit(ri)
+                self.last_emitted_page_index = ri
+            # 如果后台领先太多，信号会被丢弃，但数据已经处理完了
+            # 在pipeline完成后会批量处理所有页面
+        
+        if progress_percent == 100:
             self.finishImgtransPipeline()
 
     def on_update_inpaint_progress(self, progress: int):
@@ -833,6 +916,13 @@ class ModuleManager(QObject):
             self.last_finished_index = ri
             self.page_trans_finished.emit(ri)
         if progress == 100:
+            self.finishImgtransPipeline()
+    
+    def on_update_general_progress(self, progress: int):
+        """当所有模块都不勾选时的通用进度更新"""
+        progress_percent = int(progress / self.imgtrans_thread.num_pages * 100)
+        self.progress_msgbox.updateTaskProgress(progress_percent, f' {progress}/{self.imgtrans_thread.num_pages}')
+        if progress_percent == 100:
             self.finishImgtransPipeline()
 
     def progress(self):

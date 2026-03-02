@@ -211,6 +211,8 @@ class FontFamilyComboBox(QFontComboBox):
     param_changed = Signal(str, object)
     def __init__(self, emit_if_focused=True, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        # 设置字体过滤器，只显示可缩放字体，减少渲染数量
+        self.setFontFilters(QFontComboBox.FontFilter.ScalableFonts)
         self.currentFontChanged.connect(self.on_fontfamily_changed)
         self.lineedit = lineedit = LineEdit(parent=self)
         lineedit.return_pressed.connect(self.on_return_pressed)

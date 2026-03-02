@@ -9,6 +9,13 @@ from .structures import List, Dict, Config, field, nested_dataclass
 from .logger import logger as LOGGER
 from .io_utils import json_dump_nested_obj, np, serialize_np
 
+class RunStatus:
+    FIN_DET = 1
+    FIN_OCR = 2
+    FIN_INPAINT = 4
+    FIN_TRANSLATE = 8
+    FIN_ALL = 15
+
 
 @nested_dataclass
 class ModuleConfig(Config):
@@ -21,6 +28,8 @@ class ModuleConfig(Config):
     enable_ocr: bool = True
     enable_translate: bool = True
     enable_inpaint: bool = True
+    # 是否在 OCR 后进行字体检测（默认不启用）
+    ocr_font_detect: bool = False
     textdetector_params: Dict = field(default_factory=lambda: dict())
     ocr_params: Dict = field(default_factory=lambda: dict())
     translator_params: Dict = field(default_factory=lambda: dict())
@@ -30,6 +39,7 @@ class ModuleConfig(Config):
     check_need_inpaint: bool = True
     load_model_on_demand: bool = False
     empty_runcache: bool = False
+    finish_code: int = 15
 
     def get_params(self, module_key: str, for_saving=False) -> dict:
         d = self[module_key + '_params']
@@ -75,6 +85,15 @@ class ModuleConfig(Config):
         
     def all_stages_disabled(self):
         return (self.enable_detect or self.enable_ocr or self.enable_translate or self.enable_inpaint) is False
+
+    def __post_init__(self):
+        self.update_finish_code()
+
+    def update_finish_code(self):
+        self.finish_code = self.enable_detect * RunStatus.FIN_DET + \
+            self.enable_ocr * RunStatus.FIN_OCR + \
+                self.enable_translate * RunStatus.FIN_TRANSLATE + \
+                    self.enable_inpaint * RunStatus.FIN_INPAINT
         
 
 @nested_dataclass
@@ -145,6 +164,17 @@ class ProgramConfig(Config):
     expand_teffect_panel: bool = True
     text_advanced_format_panel: bool = True
     expand_tadvanced_panel: bool = True
+    
+    # 导航器设置
+    navigator_x: int = -1
+    navigator_y: int = -1
+    navigator_width: int = 240
+    navigator_height: int = 300
+    navigator_show_mouse_indicator: bool = True
+    navigator_mouse_indicator_size: int = 4
+    navigator_mouse_indicator_color: List = field(default_factory=lambda: [255, 0, 0, 255])
+    navigator_show_viewport_cross: bool = False
+    navigator_viewport_color: List = field(default_factory=lambda: [255, 0, 0, 255])
 
     @staticmethod
     def load(cfg_path: str):
@@ -268,7 +298,7 @@ def save_config():
         return False
     
     os.replace(tmp_save_tgt, shared.CONFIG_PATH)
-    LOGGER.info('Config saved')
+    LOGGER.info('配置已保存')
     return True
 
 def save_text_styles(raise_exception = False):
